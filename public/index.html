@@ -1,0 +1,151 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Real-time Orders</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin: 20px; background:#f6f8fb; color:#111; }
+    .wrap { max-width: 920px; margin: 0 auto; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+    h1 { font-size:20px; margin:0; }
+    #events { display:flex; flex-direction:column; gap:8px; }
+    .event { background:#fff; padding:12px; border-radius:10px; box-shadow: 0 1px 4px rgba(15,20,30,0.06); border: 1px solid rgba(15,20,30,0.04); }
+    .meta { color: #666; font-size: 12px; margin-top:6px; }
+    .badge { padding:4px 8px; border-radius:999px; font-size:12px; background:#eef2ff; color:#3730a3; display:inline-block; margin-right:8px; }
+    .small { font-size:13px; color:#444; }
+    .empty { color:#666; text-align:center; margin-top:40px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Orders — Real time</h1>
+        <div class="small">Change-stream driven, updates & deletes mutate existing cards (no duplicates).</div>
+      </div>
+      <div>
+        <button id="refreshBtn">Refresh</button>
+      </div>
+    </header>
+
+    <div id="events"></div>
+    <div id="empty" class="empty" style="display:none">No orders yet — create one via the API (curl / Postman).</div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    const container = document.getElementById('events');
+    const emptyEl = document.getElementById('empty');
+    const refreshBtn = document.getElementById('refreshBtn');
+
+    function showEmptyIfNeeded() {
+      if (container.children.length === 0) emptyEl.style.display = 'block';
+      else emptyEl.style.display = 'none';
+    }
+
+    // produce a stable DOM id string for an order
+    function domIdFor(payload) {
+      const full = payload.fullDocument || {};
+      const idField = full.id ?? (payload.id ?? (payload.documentKey?._id ?? null));
+      return 'order-' + String(idField);
+    }
+
+    // Render or update an order card
+    function renderOrUpdate(payload) {
+      const domId = domIdFor(payload);
+      const doc = payload.fullDocument || {};
+      const idDisplay = doc.id ?? payload.id ?? (payload.documentKey?._id ?? 'unknown');
+      const customer = doc.customer_name ?? payload.updateDescription?.updatedFields?.customer_name ?? '-';
+      const product = doc.product_name ?? payload.updateDescription?.updatedFields?.product_name ?? '-';
+      const status = doc.status ?? payload.updateDescription?.updatedFields?.status ?? '-';
+      const ts = new Date().toLocaleString();
+      const op = (payload.op || payload.operationType || 'event').toUpperCase();
+
+      // build element (update if exists)
+      let el = document.getElementById(domId);
+      const content = `
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <div>
+            <div><span class="badge">${op}</span> <strong>Order</strong> — #${idDisplay}</div>
+            <div class="small">customer: ${escapeHtml(customer)} — product: ${escapeHtml(product)} — status: ${escapeHtml(status)}</div>
+          </div>
+          <div class="meta">${ts}</div>
+        </div>
+      `;
+
+      if (!el) {
+        el = document.createElement('div');
+        el.id = domId;
+        el.className = 'event';
+        el.innerHTML = content;
+        container.insertBefore(el, container.firstChild); // show newest on top
+      } else {
+        // update existing element and move it to top
+        el.innerHTML = content;
+        container.removeChild(el);
+        container.insertBefore(el, container.firstChild);
+      }
+
+      showEmptyIfNeeded();
+    }
+
+    // Remove an order element from DOM
+    function removeElement(payload) {
+      const domId = domIdFor(payload);
+      const el = document.getElementById(domId);
+      if (el) el.remove();
+      showEmptyIfNeeded();
+    }
+
+    // Escape helper
+    function escapeHtml(str) {
+      if (str === undefined || str === null) return '';
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    // Initial load
+    async function loadInitial() {
+      try {
+        const res = await fetch('/orders');
+        if (!res.ok) throw new Error('Failed to fetch orders');
+        const data = await res.json();
+        container.innerHTML = '';
+        data.forEach(o => renderOrUpdate({ op: 'initial', fullDocument: o }));
+      } catch (e) {
+        console.error('Initial load error', e);
+      } finally {
+        showEmptyIfNeeded();
+      }
+    }
+
+    refreshBtn.addEventListener('click', loadInitial);
+
+    // Socket event handler
+    socket.on('orderChanged', function(payload) {
+      // the server emits { op, id, fullDocument, documentKey, updateDescription }
+      const op = (payload.op || payload.operationType || '').toLowerCase();
+      if (op === 'insert' || op === 'replace' || op === 'initial') {
+        renderOrUpdate(payload);
+      } else if (op === 'update') {
+        // update might contain partial fields; our render tries to use fullDocument first
+        renderOrUpdate(payload);
+      } else if (op === 'delete') {
+        removeElement(payload);
+      } else {
+        // fallback: upsert display
+        renderOrUpdate(payload);
+      }
+    });
+
+    // Start by loading initial data
+    loadInitial();
+  </script>
+</body>
+</html>
